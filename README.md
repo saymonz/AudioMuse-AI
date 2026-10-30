@@ -11,6 +11,21 @@
 💛 <a href="https://liberapay.com/NeptuneHub/donate">Donate</a> to shape AudioMuse-AI future by supporting AI licenses, homelab infrastructure, and continuous development.
 </p>
 
+> [!NOTE]
+> ### 🎵 Fork: Configurable Playlist Prefix & Suffix
+> This repository is a community fork of [NeptuneHub/AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI) tracking upstream releases and adding **configurable prefix & suffix naming for cluster playlists** (addressing [Issue #842](https://github.com/NeptuneHub/AudioMuse-AI/issues/842) / [PR #953](https://github.com/NeptuneHub/AudioMuse-AI/pull/953)).
+>
+> **Key features of this fork:**
+> * **Flexible Naming:** Configure custom playlist prefix (`CLUSTERING_PLAYLIST_PREFIX`) and suffix (`CLUSTERING_PLAYLIST_SUFFIX`).
+> * **Folder Organization:** Organize cluster playlists under virtual folder prefixes (e.g. `Audiomuse/` for Navidrome, Jellyfin, and Subsonic clients).
+> * **Safe Cleanup:** Cleanup only deletes playlists matching your configured pattern, with an automatic failsafe abort if both affixes are empty.
+>
+> **Pre-built container images available:**
+> * **CPU / Web:** `ghcr.io/saymonz/audiomuse-ai:latest`
+> * **GPU / Nvidia:** `ghcr.io/saymonz/audiomuse-ai:latest-nvidia`
+>
+> *Always back up your AudioMuse-AI and media server databases before testing experimental builds.*
+
 # **AudioMuse-AI - Where Music Takes Shape** 
 
 <p align="center">
