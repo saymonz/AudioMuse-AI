@@ -26,6 +26,7 @@ Everything a plugin can do, at a glance. The last column tells you where to find
 | 14 | Create media-server playlists | `tasks.mediaserver` | No - see "Create a playlist on your media server" |
 | 15 | Extra ONNX execution provider (optionally scoped per model) | `register_onnx_provider` | No - see "API reference" (advanced) |
 | 16 | Replace an analysis component (e.g. the ASR/Whisper backend) | `register_analysis_provider` | No - see "API reference" (advanced) |
+| 17 | Replace a clustering component (e.g. playlist naming and cleanup) | `register_clustering_provider` | No - see "API reference" (advanced) |
 
 ## Installing and managing plugins
 
@@ -478,6 +479,7 @@ And the methods on the `ctx` object in `register(ctx)`:
 | `on_flask_start(func)` / `on_worker_start(func)` | Run at every start of that container, after the plugin loads. |
 | `register_onnx_provider(name, options, position, only_models=None, exclude_models=None, needs_static_shapes=False)` | Advanced: offer an extra ONNX Runtime execution provider (for example a GPU) for analysis. See "Offer an ONNX execution provider" below. |
 | `register_analysis_provider(component, factory, cache=True)` | Advanced: replace a whole analysis component with a plugin-supplied implementation. `component` is currently `asr` (the Whisper backend); `factory` is the replacement module/object (or a zero-arg callable returning one) matching the built-in surface `load_whisper_model`/`transcribe`/`is_loaded`/`unload`. See "Replace an analysis component" below for what each method must return. Consulted before the built-in; an unknown `component` or a backend missing part of that surface is ignored with a warning in the logs, and the built-in is used. `cache=True` (the default) resolves a callable `factory` once and reuses the result, like the built-in modules, which stay loaded for a whole album; pass `cache=False` to be called for every use, and then unload what you hand out yourself. |
+| `register_clustering_provider(component, factory)` | Advanced: replace a clustering step with a plugin-supplied implementation. `component` is currently `playlist_naming`; `factory` is the replacement module/object (or a zero-arg callable returning one) matching `format_name`/`should_delete` (plus optional `unformat_name`/`on_created`/`after_cleanup`). See "Replace a clustering component" below. Resolved fresh once per server per clustering run, with the same fallback semantics as `register_analysis_provider`. |
 
 ### Offer an ONNX execution provider
 
@@ -535,6 +537,51 @@ def _load_backend():
     # built-in backend. Returning the module keeps it loaded for a whole album.
     from . import my_whisper
     return my_whisper
+```
+
+### Replace a clustering component
+
+By default, clustering names every generated playlist `<name>_automatic` and deletes playlists ending in `_automatic` before creating the next batch. `register_clustering_provider('playlist_naming', factory)` lets one plugin replace both naming and cleanup atomically, so the media server and AudioMuse-AI's own playlist view stay in sync. Disabling or uninstalling the plugin reverts cleanup to `_automatic`, so playlists created under your custom scheme remain on the media server unless you remove them.
+
+Your replacement must expose `format_name` and `should_delete`. If either is missing, core logs a warning naming your plugin and keeps the built-in `_automatic` scheme for both steps. The remaining methods are optional. Core resolves `factory` once per server per clustering run, inside that server's bound context, and preserves that server context across every call on the returned provider (`format_name`, `unformat_name`, `should_delete`, `after_cleanup`, `on_created`), so `active_server_id()` always identifies the target server whether `factory` is a callable or a module/singleton.
+
+| Method | Required | Must return |
+|---|---|---|
+| `format_name(base_name, chunk_index=None)` | Yes | Non-empty `str` for the playlist name (for example `f"Audiomuse/{base_name}"`). `chunk_index` is `None` unless the cluster was split into numbered parts (`1`, `2`, ...). An empty/non-string return or an exception falls back to `<base_name>_automatic`; colliding names within a run are disambiguated with ` (2)`, ` (3)`, ... |
+| `should_delete(playlist)` | Yes | `True` when `playlist` (the raw dict from the media server, carrying `Id`/`id` and `Name`) belongs to clustering and should be removed during cleanup, `False` otherwise. |
+| `unformat_name(playlist_name)` | No | The bare title without your prefix/suffix (or `None` when `playlist_name` does not match your scheme), so AI playlist naming history keeps recognizing previously used titles. |
+| `on_created(playlist, playlist_name)` | No | Nothing. Called with the media server's response right after a clustering playlist is created, so a stateful plugin can record its `Id` in `table(...)`. |
+| `after_cleanup(deleted_ids, playlists)` | No | Nothing. Called once after cleanup finishes on the active server with the deleted playlist ids and the full playlist list fetched before deletion. That list is empty when the server could not be listed, so do not read it as "every playlist is gone". |
+
+```python
+from plugin.api import get_setting
+
+
+class _PrefixNamer:
+    def __init__(self, prefix):
+        self.prefix = prefix
+
+    def format_name(self, base_name, chunk_index=None):
+        stem = f"{base_name} ({chunk_index})" if chunk_index is not None else base_name
+        return f"{self.prefix}{stem}"
+
+    def should_delete(self, playlist):
+        name = (playlist or {}).get("Name") or ""
+        return bool(self.prefix) and name.startswith(self.prefix)
+
+    def unformat_name(self, playlist_name):
+        if self.prefix and playlist_name.startswith(self.prefix):
+            return playlist_name[len(self.prefix):]
+        return None
+
+
+def _build_namer():
+    prefix = get_setting("prefix", "Audiomuse/")
+    return _PrefixNamer(prefix) if prefix else None
+
+
+def register(ctx):
+    ctx.register_clustering_provider("playlist_naming", _build_namer)
 ```
 
 ## Who can see and manage plugins

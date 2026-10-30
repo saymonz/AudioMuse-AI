@@ -17,9 +17,10 @@ Main Features:
 * ``PluginContext`` accumulates flask-vs-worker component registrations.
 * Facade helpers (``get_db``, ``get_setting``/``set_setting``, ``table``, ``enqueue``)
   auto-resolve the calling plugin id from the import namespace.
-* ``ANALYSIS_COMPONENTS`` names the analysis steps a plugin may replace
-  wholesale through ``register_analysis_provider``, and ``ONNX_POSITIONS`` where
-  a plugin provider goes in the ONNX chain (``register_onnx_provider``).
+* ``ANALYSIS_COMPONENTS`` and ``CLUSTERING_COMPONENTS`` name the core steps a
+  plugin may replace wholesale through ``register_analysis_provider`` and
+  ``register_clustering_provider``, and ``ONNX_POSITIONS`` where a plugin
+  provider goes in the ONNX chain (``register_onnx_provider``).
 * ``RESERVED_TASK_PARAMS`` are the argument names
   ``plugin.manager.run_plugin_task`` consumes itself, so a plugin task function
   that declared one could never receive it.
@@ -63,6 +64,8 @@ _ID_RE = re.compile(r'^[a-z][a-z0-9_]{1,63}$')
 _NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 
 ANALYSIS_COMPONENTS = frozenset({'asr'})
+
+CLUSTERING_COMPONENTS = frozenset({'playlist_naming'})
 
 ONNX_POSITIONS = frozenset({'before_cuda', 'before_cpu'})
 
@@ -258,6 +261,7 @@ class PluginContext:
         self.tasks = {}
         self.onnx_providers = []
         self.analysis_providers = {}
+        self.clustering_providers = {}
         self.flask_start = []
         self.worker_start = []
         self.song_analyzed_hooks = []
@@ -330,3 +334,18 @@ class PluginContext:
                 self.plugin_id, component,
             )
         self.analysis_providers[component] = {'factory': factory, 'cache': bool(cache)}
+
+    def register_clustering_provider(self, component, factory):
+        if component not in CLUSTERING_COMPONENTS:
+            logger.warning(
+                'Plugin %s registered a clustering provider for unknown component %r; '
+                'ignoring it. Known components: %s',
+                self.plugin_id, component, sorted(CLUSTERING_COMPONENTS),
+            )
+            return
+        if component in self.clustering_providers:
+            logger.warning(
+                'Plugin %s registered two clustering providers for %r; keeping the last one',
+                self.plugin_id, component,
+            )
+        self.clustering_providers[component] = factory
