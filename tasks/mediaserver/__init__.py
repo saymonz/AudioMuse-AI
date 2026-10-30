@@ -38,7 +38,6 @@ _TRACK_IDS_REQUIRED = "Track IDs are required."
 
 _PUBLIC_SERVER_API = (
     'resolve_emby_jellyfin_user', 'delete_playlists_by_suffix', 'delete_automatic_playlists',
-    'delete_playlists_by_prefix_suffix',
     'get_recent_albums', 'get_tracks_from_album', 'download_track', 'get_all_songs',
     'list_libraries', 'search_albums', 'test_connection', 'get_playlist_by_name',
     'get_all_playlists', 'get_playlist_track_ids', 'create_playlist', 'create_instant_playlist',
@@ -76,46 +75,12 @@ def resolve_emby_jellyfin_user(identifier, token=None):
     return _provider(stype).resolve_user(identifier, creds.get('token') or fallback)
 
 
-def _strip_chunk_suffix(name: str) -> str:
-    if name.endswith(')'):
-        idx = name.rfind('(')
-        if idx > 0 and name[idx - 1].isspace() and name[idx + 1:-1].isdigit():
-            return name[:idx].rstrip()
-    return name
-
-
-def _matches_automatic_naming(name, prefix="", suffix=""):
-    if not isinstance(name, str) or not name:
-        return False
-
-    prefix = prefix.lstrip() if isinstance(prefix, str) else ""
-    suffix = suffix.rstrip() if isinstance(suffix, str) else ""
-
-    if len(prefix.strip() + suffix.strip()) < 2:
-        return False
-
-    if prefix:
-        if not name.startswith(prefix):
-            return False
-        name = name[len(prefix):]
-
-    name = _strip_chunk_suffix(name)
-
-    if suffix:
-        if not name.endswith(suffix):
-            return False
-        name = name[:-len(suffix)]
-
-    return bool(name.strip())
-
-
-def _delete_matching_playlists(playlists_to_check, delete_function, suffix="", prefix=""):
+def _delete_matching_playlists(playlists_to_check, delete_function, suffix):
     deleted_count = 0
     for p in playlists_to_check:
         playlist_id = p.get('Id') or p.get('id')
-        name = p.get('Name') or p.get('name') or ''
         try:
-            if _matches_automatic_naming(name, prefix=prefix, suffix=suffix) and delete_function(playlist_id):
+            if p.get('Name', '').endswith(suffix) and delete_function(playlist_id):
                 deleted_count += 1
         except Exception:
             logger.exception(
@@ -124,54 +89,46 @@ def _delete_matching_playlists(playlists_to_check, delete_function, suffix="", p
     return deleted_count
 
 
-def delete_playlists_by_prefix_suffix(prefix="", suffix=""):
-    prefix = prefix.lstrip() if isinstance(prefix, str) else ""
-    suffix = suffix.rstrip() if isinstance(suffix, str) else ""
-
-    if len(prefix.strip() + suffix.strip()) < 2:
-        logger.warning(
-            "Neither prefix nor suffix has sufficient non-whitespace characters (at least 2 required) "
-            "for safe automatic playlist deletion (prefix: %r, suffix: %r); "
-            "skipping deletion to prevent unintended deletion of all media server playlists.",
-            prefix,
-            suffix,
-        )
-        return 0
-
-    desc = []
-    if prefix:
-        desc.append(f"prefix '{prefix}'")
-    if suffix:
-        desc.append(f"suffix '{suffix}'")
-    logger.info(f"Starting deletion of all playlists with {' and '.join(desc)}.")
+def delete_playlists_by_suffix(suffix):
+    logger.info(f"Starting deletion of all '{suffix}' playlists.")
     deleted_count = 0
 
     provider = _provider()
     if provider is not None:
         deleted_count = _delete_matching_playlists(
-            provider.get_all_playlists(), provider.delete_playlist, suffix=suffix, prefix=prefix
+            provider.get_all_playlists(), provider.delete_playlist, suffix
         )
 
     logger.info(f"Finished deletion. Deleted {deleted_count} playlists.")
-    return deleted_count
 
 
-def delete_playlists_by_suffix(suffix):
-    return delete_playlists_by_prefix_suffix(suffix=suffix)
+def _delete_playlists_with_namer(namer):
+    logger.info("Starting deletion of clustering playlists via plugin '%s'.", namer.owner)
+    deleted_ids = []
+    provider = _provider()
+    if provider is not None:
+        playlists = provider.get_all_playlists()
+        for p in playlists:
+            playlist_id = p.get('Id') or p.get('id')
+            try:
+                if namer.should_delete(p) and provider.delete_playlist(playlist_id):
+                    deleted_ids.append(playlist_id)
+            except Exception:
+                logger.exception(
+                    f"Failed to delete playlist {playlist_id}; continuing with the remaining playlists."
+                )
+        namer.after_cleanup(deleted_ids, playlists)
+    logger.info(f"Finished deletion. Deleted {len(deleted_ids)} playlists.")
 
 
 def delete_automatic_playlists():
-    prefix = (
-        config.CLUSTERING_PLAYLIST_PREFIX
-        if isinstance(config.CLUSTERING_PLAYLIST_PREFIX, str)
-        else ""
-    )
-    suffix = (
-        config.CLUSTERING_PLAYLIST_SUFFIX
-        if isinstance(config.CLUSTERING_PLAYLIST_SUFFIX, str)
-        else "_automatic"
-    )
-    return delete_playlists_by_prefix_suffix(prefix=prefix, suffix=suffix)
+    from .._playlist_namer import get_playlist_namer
+
+    namer = get_playlist_namer()
+    if namer.is_default:
+        delete_playlists_by_suffix('_automatic')
+        return
+    _delete_playlists_with_namer(namer)
 
 
 def get_recent_albums(limit):

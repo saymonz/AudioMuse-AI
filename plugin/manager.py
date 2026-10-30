@@ -276,6 +276,8 @@ class PluginManager:
         self.last_pip_error = None
         self._analysis_provider_cache = {}
         self._analysis_provider_owners = {}
+        self._clustering_provider_cache = {}
+        self._clustering_provider_owners = {}
 
     def enabled(self):
         return bool(config.PLUGINS_ENABLED)
@@ -315,6 +317,8 @@ class PluginManager:
     def sync(self, conn=None, role=None):
         self._analysis_provider_cache = {}
         self._analysis_provider_owners = {}
+        self._clustering_provider_cache = {}
+        self._clustering_provider_owners = {}
         if not self.enabled():
             self.records = {}
             return
@@ -331,6 +335,7 @@ class PluginManager:
                 record['cron_tasks'] = {}
                 record['onnx_providers'] = []
                 record['analysis_providers'] = {}
+                record['clustering_providers'] = {}
                 record['song_analyzed_hooks'] = []
                 record['error'] = None
                 records[row['id']] = record
@@ -583,6 +588,7 @@ class PluginManager:
                     record['cron_tasks'] = {**(ctx.tasks or {}), **(ctx.cron_tasks or {})}
                     record['onnx_providers'] = ctx.onnx_providers
                     record['analysis_providers'] = ctx.analysis_providers
+                    record['clustering_providers'] = ctx.clustering_providers
                     record['song_analyzed_hooks'] = ctx.song_analyzed_hooks
                     if role == 'web' and flask_app is not None and ctx.blueprint is not None:
                         if ctx.blueprint.name != plugin_id:
@@ -822,54 +828,78 @@ class PluginManager:
                 providers.extend(record.get('onnx_providers', []))
         return providers
 
-    def get_analysis_provider(self, component):
-        if component in self._analysis_provider_cache:
-            return self._analysis_provider_cache[component]
+    def _call_provider_factory(self, entry, plugin_id, kind, component):
+        try:
+            factory = entry['factory']
+            provider = factory() if callable(factory) else factory
+        except Exception:
+            logger.exception(
+                'Plugin %s: its %s provider for %r failed to resolve; '
+                'falling back to the next provider or the built-in one',
+                plugin_id, kind, component,
+            )
+            return None
+        if provider is None:
+            logger.warning(
+                'Plugin %s: its %s provider factory for %r returned None; '
+                'falling back to the next provider or the built-in one',
+                plugin_id, kind, component,
+            )
+        return provider
+
+    def _resolve_component_provider(self, field, cache_store, owner_store, kind, component):
+        if component in cache_store:
+            return cache_store[component]
         owners = [
             plugin_id for plugin_id, record in self.records.items()
             if record.get('load_status') in _LOADED_STATUSES
-            and record.get('analysis_providers', {}).get(component) is not None
+            and record.get(field, {}).get(component) is not None
         ]
         if len(owners) > 1:
             logger.warning(
-                'Plugins %s all provide the analysis component %r; trying them in that order',
-                ', '.join(owners), component,
+                'Plugins %s all provide the %s component %r; trying them in that order',
+                ', '.join(owners), kind, component,
             )
         for plugin_id in owners:
-            entry = _analysis_provider_entry(
-                self.records[plugin_id]['analysis_providers'][component]
-            )
-            try:
-                factory = entry['factory']
-                provider = factory() if callable(factory) else factory
-            except Exception:
-                logger.exception(
-                    'Plugin %s: its analysis provider for %r failed to resolve; '
-                    'falling back to the next provider or the built-in one',
-                    plugin_id, component,
-                )
-                continue
+            entry = _analysis_provider_entry(self.records[plugin_id][field][component])
+            provider = self._call_provider_factory(entry, plugin_id, kind, component)
             if provider is None:
-                logger.warning(
-                    'Plugin %s: its analysis provider factory for %r returned None; '
-                    'falling back to the next provider or the built-in one',
-                    plugin_id, component,
-                )
                 continue
-            self._analysis_provider_owners[component] = plugin_id
+            owner_store[component] = plugin_id
             if len(owners) > 1:
                 logger.warning(
-                    'Plugin %s: its analysis provider for %r is the one in use',
-                    plugin_id, component,
+                    'Plugin %s: its %s provider for %r is the one in use',
+                    plugin_id, kind, component,
                 )
             if entry['cache']:
-                self._analysis_provider_cache[component] = provider
+                cache_store[component] = provider
             return provider
-        self._analysis_provider_owners.pop(component, None)
+        owner_store.pop(component, None)
         return None
+
+    def get_analysis_provider(self, component):
+        return self._resolve_component_provider(
+            'analysis_providers',
+            self._analysis_provider_cache,
+            self._analysis_provider_owners,
+            'analysis',
+            component,
+        )
 
     def analysis_provider_owner(self, component):
         return self._analysis_provider_owners.get(component)
+
+    def get_clustering_provider(self, component):
+        return self._resolve_component_provider(
+            'clustering_providers',
+            self._clustering_provider_cache,
+            self._clustering_provider_owners,
+            'clustering',
+            component,
+        )
+
+    def clustering_provider_owner(self, component):
+        return self._clustering_provider_owners.get(component)
 
     def song_analyzed_hooks(self):
         hooks = []

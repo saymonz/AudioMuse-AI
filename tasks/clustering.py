@@ -76,8 +76,6 @@ from config import (
     MIN_PLAYLIST_SIZE_FOR_TOP_N,
     CLUSTERING_MAX_FAILED_BATCHES,
     CLUSTERING_CLEANING,
-    CLUSTERING_PLAYLIST_PREFIX,
-    CLUSTERING_PLAYLIST_SUFFIX,
     CLUSTER_NAMING_AI_HISTORY,
     CLUSTERING_MAX_PLAYLIST_SONGS,
     CLUSTERING_CALIBRATION_MAX_TRIES,
@@ -117,6 +115,7 @@ from .mediaserver import (
     delete_automatic_playlists,
 )
 from .mediaserver import registry
+from ._playlist_namer import get_playlist_namer
 from sklearn.neighbors import NearestNeighbors
 
 from .clustering_helper import (
@@ -1279,42 +1278,46 @@ def _cluster_one_server_impl(
 
     cancel(force=True)
 
-    previous_playlist_names = _previous_names_for_naming(
-        target_server['server_id'] if target_server else None
-    )
-    tail_step = [f"naming the playlists of {server_name}"]
-    with row_heartbeat(
-        current_task_id, lambda: tail_step[0],
-        stop_after_minutes=slow_step_budget_minutes(QUEUE_WEDGED_MAIN_TASK_MINUTES),
-    ):
-        final_playlists_with_details = _name_and_prepare_playlists(
-            best_result,
-            ai_model_provider_param,
-            ollama_server_url_param,
-            ollama_model_name_param,
-            openai_server_url_param,
-            openai_model_name_param,
-            openai_api_key_param,
-            gemini_api_key_param,
-            gemini_model_name_param,
-            mistral_api_key_param,
-            mistral_model_name_param,
-            previous_playlist_names=previous_playlist_names,
+    with registry.bind(target_server):
+        namer = get_playlist_namer()
+        previous_playlist_names = _previous_names_for_naming(
+            target_server['server_id'] if target_server else None,
+            namer=namer,
         )
+        tail_step = [f"naming the playlists of {server_name}"]
+        with row_heartbeat(
+            current_task_id, lambda: tail_step[0],
+            stop_after_minutes=slow_step_budget_minutes(QUEUE_WEDGED_MAIN_TASK_MINUTES),
+        ):
+            final_playlists_with_details = _name_and_prepare_playlists(
+                best_result,
+                ai_model_provider_param,
+                ollama_server_url_param,
+                ollama_model_name_param,
+                openai_server_url_param,
+                openai_model_name_param,
+                openai_api_key_param,
+                gemini_api_key_param,
+                gemini_model_name_param,
+                mistral_api_key_param,
+                mistral_model_name_param,
+                previous_playlist_names=previous_playlist_names,
+                namer=namer,
+            )
 
-        cancel(force=True)
+            cancel(force=True)
 
-        tail_step[0] = (
-            f"creating {len(final_playlists_with_details)} playlists on {server_name}"
-        )
-        report(f"Creating {len(final_playlists_with_details)} playlists on this server...", 96)
-        with registry.bind(target_server):
+            tail_step[0] = (
+                f"creating {len(final_playlists_with_details)} playlists on {server_name}"
+            )
+            report(f"Creating {len(final_playlists_with_details)} playlists on this server...", 96)
             if CLUSTERING_CLEANING:
                 delete_automatic_playlists()
             for name, songs_with_details in final_playlists_with_details.items():
                 item_ids = [item_id for item_id, _, _ in songs_with_details]
                 try:
-                    create_playlist(name, item_ids)
+                    created = create_playlist(name, item_ids)
+                    namer.on_created(created, name)
                 except PlaylistIdTranslationError:
                     logger.exception(
                         "PLAYLIST CREATION ABORTED on server '%s': the id "
@@ -1672,10 +1675,14 @@ def _launch_batch_job(
     return True
 
 
-def _previous_names_for_naming(server_id):
+def _previous_names_for_naming(server_id, namer=None):
     if not CLUSTER_NAMING_AI_HISTORY:
         return []
-    return get_recent_playlist_names(server_id, limit=60)
+    names = get_recent_playlist_names(server_id, limit=60)
+    namer = get_playlist_namer() if namer is None else namer
+    if namer.is_default:
+        return names
+    return [namer.unformat_name(name) for name in names]
 
 
 def _name_and_prepare_playlists(
@@ -1691,7 +1698,9 @@ def _name_and_prepare_playlists(
     mistral_key,
     mistral_model,
     previous_playlist_names=None,
+    namer=None,
 ):
+    namer = get_playlist_namer() if namer is None else namer
     final_playlists = {}
     used_playlist_names = list(reversed(previous_playlist_names or []))
     assigned_names = set()
@@ -1737,10 +1746,11 @@ def _name_and_prepare_playlists(
         assigned_names.add(final_name)
         used_playlist_names.append(final_name)
 
-        playlist_prefix = CLUSTERING_PLAYLIST_PREFIX.lstrip() if isinstance(CLUSTERING_PLAYLIST_PREFIX, str) else ""
-        playlist_suffix = CLUSTERING_PLAYLIST_SUFFIX.rstrip() if isinstance(CLUSTERING_PLAYLIST_SUFFIX, str) else "_automatic"
-        base_name = f"{playlist_prefix}{final_name}{playlist_suffix}"
+        base_name = namer.format_name(final_name)
         shuffled = _shuffle_playlist_songs(songs, base_name)
-        _assign_playlist_chunks(shuffled, max_songs, base_name, final_playlists)
+        if namer.is_default:
+            _assign_playlist_chunks(shuffled, max_songs, base_name, final_playlists)
+        else:
+            namer.assign_chunks(shuffled, max_songs, final_name, base_name, final_playlists)
 
     return final_playlists
