@@ -89,6 +89,8 @@ def delete_playlists_where(should_delete):
         playlists = provider.get_all_playlists()
         for p in playlists:
             playlist_id = p.get('Id') or p.get('id')
+            if not playlist_id:
+                continue
             try:
                 if should_delete(p) and provider.delete_playlist(playlist_id):
                     deleted_ids.append(playlist_id)
@@ -102,7 +104,7 @@ def delete_playlists_where(should_delete):
 
 def delete_playlists_by_suffix(suffix):
     logger.info(f"Starting deletion of all '{suffix}' playlists.")
-    delete_playlists_where(lambda p: p.get('Name', '').endswith(suffix))
+    delete_playlists_where(lambda p: (p.get('Name') or '').endswith(suffix))
 
 
 def delete_automatic_playlists():

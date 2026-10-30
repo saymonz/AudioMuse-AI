@@ -276,7 +276,6 @@ class PluginManager:
         self.last_pip_error = None
         self._analysis_provider_cache = {}
         self._analysis_provider_owners = {}
-        self._clustering_provider_cache = {}
         self._clustering_provider_owners = {}
 
     def enabled(self):
@@ -317,7 +316,6 @@ class PluginManager:
     def sync(self, conn=None, role=None):
         self._analysis_provider_cache = {}
         self._analysis_provider_owners = {}
-        self._clustering_provider_cache = {}
         self._clustering_provider_owners = {}
         if not self.enabled():
             self.records = {}
@@ -828,27 +826,8 @@ class PluginManager:
                 providers.extend(record.get('onnx_providers', []))
         return providers
 
-    def _call_provider_factory(self, entry, plugin_id, kind, component):
-        try:
-            factory = entry['factory']
-            provider = factory() if callable(factory) else factory
-        except Exception:
-            logger.exception(
-                'Plugin %s: its %s provider for %r failed to resolve; '
-                'falling back to the next provider or the built-in one',
-                plugin_id, kind, component,
-            )
-            return None
-        if provider is None:
-            logger.warning(
-                'Plugin %s: its %s provider factory for %r returned None; '
-                'falling back to the next provider or the built-in one',
-                plugin_id, kind, component,
-            )
-        return provider
-
     def _resolve_component_provider(self, field, cache_store, owner_store, kind, component):
-        if component in cache_store:
+        if cache_store is not None and component in cache_store:
             return cache_store[component]
         owners = [
             plugin_id for plugin_id, record in self.records.items()
@@ -862,8 +841,22 @@ class PluginManager:
             )
         for plugin_id in owners:
             entry = _analysis_provider_entry(self.records[plugin_id][field][component])
-            provider = self._call_provider_factory(entry, plugin_id, kind, component)
+            try:
+                factory = entry['factory']
+                provider = factory() if callable(factory) else factory
+            except Exception:
+                logger.exception(
+                    'Plugin %s: its %s provider for %r failed to resolve; '
+                    'falling back to the next provider or the built-in one',
+                    plugin_id, kind, component,
+                )
+                continue
             if provider is None:
+                logger.warning(
+                    'Plugin %s: its %s provider factory for %r returned None; '
+                    'falling back to the next provider or the built-in one',
+                    plugin_id, kind, component,
+                )
                 continue
             owner_store[component] = plugin_id
             if len(owners) > 1:
@@ -871,7 +864,7 @@ class PluginManager:
                     'Plugin %s: its %s provider for %r is the one in use',
                     plugin_id, kind, component,
                 )
-            if entry['cache']:
+            if cache_store is not None and entry['cache']:
                 cache_store[component] = provider
             return provider
         owner_store.pop(component, None)
@@ -892,7 +885,7 @@ class PluginManager:
     def get_clustering_provider(self, component):
         return self._resolve_component_provider(
             'clustering_providers',
-            self._clustering_provider_cache,
+            None,
             self._clustering_provider_owners,
             'clustering',
             component,

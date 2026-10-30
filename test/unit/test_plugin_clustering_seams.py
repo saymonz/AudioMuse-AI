@@ -11,14 +11,14 @@
 Covers ``PluginContext.register_clustering_provider``,
 ``PluginManager.get_clustering_provider``, ``tasks._playlist_namer.get_playlist_namer``,
 and the clustering / mediaserver callers that consume it:
-``_previous_names_for_naming``, ``_name_and_prepare_playlists``, and
-``delete_playlists_where``.
+``_previous_names_for_naming``, ``_name_and_prepare_playlists``,
+``_assign_playlist_chunks``, and ``delete_playlists_where``.
 
 Main Features:
-* PluginContext registers clustering components and stores factory and cache opts
-* PluginManager resolves and caches clustering providers, falling back on errors
-* get_playlist_namer resolves the provider or falls back to the default namer
-* Isolates per-call errors and colliding names so duplicate names fall back
+* PluginContext registers clustering components and stores their factory
+* PluginManager resolves clustering providers fresh per lookup, falling back on errors
+* get_playlist_namer resolves the provider, preserves server context, or uses the default
+* Isolates per-call errors and disambiguates colliding formatted names without overwrites
 * Clustering and mediaserver delete_playlists_where delegate cleanup cleanly
 """
 
@@ -29,6 +29,8 @@ import plugin.api as api
 import plugin.manager as manager
 import tasks._playlist_namer as playlist_namer
 from tasks import clustering
+from tasks.clustering_helper import _assign_playlist_chunks
+from tasks.mediaserver import context as ms_context
 
 
 def _record(plugin_id, load_status='ok', clustering_providers=None):
@@ -91,14 +93,7 @@ class TestRegisterClusteringProvider:
         ctx = api.PluginContext('demo', 'worker')
         backend = object()
         ctx.register_clustering_provider('playlist_naming', backend)
-        assert ctx.clustering_providers == {
-            'playlist_naming': {'factory': backend, 'cache': True}
-        }
-
-    def test_cache_opt_out_is_stored(self):
-        ctx = api.PluginContext('demo', 'worker')
-        ctx.register_clustering_provider('playlist_naming', object(), cache=False)
-        assert ctx.clustering_providers['playlist_naming']['cache'] is False
+        assert ctx.clustering_providers == {'playlist_naming': backend}
 
     def test_unknown_component_is_ignored(self, caplog):
         ctx = api.PluginContext('demo', 'worker')
@@ -111,7 +106,7 @@ class TestRegisterClusteringProvider:
         first, second = object(), object()
         ctx.register_clustering_provider('playlist_naming', first)
         ctx.register_clustering_provider('playlist_naming', second)
-        assert ctx.clustering_providers['playlist_naming']['factory'] is second
+        assert ctx.clustering_providers['playlist_naming'] is second
         assert 'two clustering providers' in caplog.text
 
     def test_two_plugins_for_one_component_warn(self, caplog):
@@ -125,7 +120,7 @@ class TestRegisterClusteringProvider:
         assert mgr.clustering_provider_owner('playlist_naming') == 'a'
         assert 'all provide the clustering component' in caplog.text
 
-    def test_cached_and_uncached_factories(self):
+    def test_factory_runs_fresh_on_every_lookup(self):
         mgr = manager.PluginManager()
         calls = []
 
@@ -134,34 +129,18 @@ class TestRegisterClusteringProvider:
             return object()
 
         mgr.records = {
-            'p': _record('p', clustering_providers={
-                'playlist_naming': {'factory': factory, 'cache': True},
-            })
+            'p': _record('p', clustering_providers={'playlist_naming': factory})
         }
-        assert (
-            mgr.get_clustering_provider('playlist_naming')
-            is mgr.get_clustering_provider('playlist_naming')
-        )
-        assert len(calls) == 1
+        first = mgr.get_clustering_provider('playlist_naming')
+        second = mgr.get_clustering_provider('playlist_naming')
+        assert first is not second
+        assert len(calls) == 2
 
-        mgr_uncached = manager.PluginManager()
-        mgr_uncached.records = {
-            'p': _record('p', clustering_providers={
-                'playlist_naming': {'factory': object, 'cache': False},
-            })
-        }
-        assert (
-            mgr_uncached.get_clustering_provider('playlist_naming')
-            is not mgr_uncached.get_clustering_provider('playlist_naming')
-        )
-
-    def test_sync_clears_clustering_cache_and_owners(self, monkeypatch):
+    def test_sync_clears_clustering_owners(self, monkeypatch):
         mgr = manager.PluginManager()
-        mgr._clustering_provider_cache = {'playlist_naming': object()}
         mgr._clustering_provider_owners = {'playlist_naming': 'p'}
         monkeypatch.setattr(mgr, 'enabled', lambda: False)
         mgr.sync()
-        assert mgr._clustering_provider_cache == {}
         assert mgr._clustering_provider_owners == {}
 
     def test_broken_or_none_factory_falls_back(self, caplog):
@@ -208,27 +187,22 @@ class TestPlaylistNamerResolver:
         assert 'half_plugin' in caplog.text
         assert 'should_delete' in caplog.text
 
-    def test_colliding_format_name_falls_back_instead_of_merging(self, monkeypatch, caplog):
-        constant = types.SimpleNamespace(
-            format_name=lambda name, chunk_index=None: 'Same Name',
-            should_delete=lambda _p: False,
+    def test_format_name_is_pure_and_idempotent(self, monkeypatch):
+        backend = _FolderNamer(prefix='Audiomuse/', suffix='')
+        monkeypatch.setattr(
+            manager.plugin_manager, 'get_clustering_provider', lambda _c: backend
         )
         monkeypatch.setattr(
-            manager.plugin_manager, 'get_clustering_provider', lambda _c: constant
-        )
-        monkeypatch.setattr(
-            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'constant_plugin'
+            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'playlist_naming'
         )
         namer = playlist_namer.get_playlist_namer()
-        assert namer.format_name('Rock') == 'Same Name'
-        assert namer.format_name('Jazz') == 'Jazz_automatic'
-        assert namer.format_name('Jazz', chunk_index=2) == 'Jazz_automatic (2)'
-        assert 'already used' in caplog.text
+        assert namer.format_name('Rock') == 'Audiomuse/Rock'
+        assert namer.format_name('Rock') == 'Audiomuse/Rock'
 
     def test_empty_or_failing_format_name_falls_back_per_call(self, monkeypatch, caplog):
         flaky = types.SimpleNamespace(
             format_name=lambda name, chunk_index=None: (
-                '' if name == 'Empty' else (_ for _ in ()).throw(RuntimeError('boom'))
+                '   ' if name == 'Empty' else (_ for _ in ()).throw(RuntimeError('boom'))
             ),
             should_delete=lambda _p: False,
         )
@@ -243,14 +217,16 @@ class TestPlaylistNamerResolver:
         assert namer.format_name('Crash', chunk_index=3) == 'Crash_automatic (3)'
         assert 'flaky_plugin' in caplog.text
 
-    def test_should_delete_and_optional_hooks_swallow_exceptions(self, monkeypatch, caplog):
+    def test_should_delete_and_optional_hooks_swallow_exceptions_and_blank_unformat(
+        self, monkeypatch, caplog
+    ):
         def bad_hook(*_a, **_kw):
             raise RuntimeError('hook exploded')
 
         broken = types.SimpleNamespace(
             format_name=lambda name, chunk_index=None: f"Mix/{name}",
             should_delete=bad_hook,
-            unformat_name=bad_hook,
+            unformat_name=lambda name: '   ' if name == 'Blank' else bad_hook(),
             on_created=bad_hook,
             after_cleanup=bad_hook,
         )
@@ -262,10 +238,47 @@ class TestPlaylistNamerResolver:
         )
         namer = playlist_namer.get_playlist_namer()
         assert namer.should_delete({'Id': 'p1', 'Name': 'Mix/Rock'}) is False
+        assert namer.unformat_name('Blank') == 'Blank'
         assert namer.unformat_name('Mix/Rock') == 'Mix/Rock'
         namer.on_created({'Id': 'p1'}, 'Mix/Rock')
         namer.after_cleanup(['p1'], [])
         assert 'broken_plugin' in caplog.text
+
+    def test_namer_preserves_bound_server_across_unbound_calls(self, monkeypatch):
+        seen_servers = []
+        singleton = types.SimpleNamespace(
+            format_name=lambda name, chunk_index=None: (
+                seen_servers.append(('format', ms_context.active_server_id())) or f"S/{name}"
+            ),
+            unformat_name=lambda name: (
+                seen_servers.append(('unformat', ms_context.active_server_id())) or name
+            ),
+            should_delete=lambda _p: (
+                seen_servers.append(('delete', ms_context.active_server_id())) or False
+            ),
+        )
+        monkeypatch.setattr(
+            manager.plugin_manager, 'get_clustering_provider', lambda _c: singleton
+        )
+        monkeypatch.setattr(
+            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'singleton_plugin'
+        )
+
+        with ms_context.use_server({'server_id': 'srv-42'}):
+            namer = playlist_namer.get_playlist_namer()
+
+        assert ms_context.active_server_id() is None
+        assert namer.unformat_name('Old') == 'Old'
+        assert namer.format_name('New') == 'S/New'
+        assert ms_context.active_server_id() is None
+        with ms_context.use_server({'server_id': 'srv-99'}):
+            assert namer.should_delete({'Id': 'p1'}) is False
+
+        assert seen_servers == [
+            ('unformat', 'srv-42'),
+            ('format', 'srv-42'),
+            ('delete', 'srv-99'),
+        ]
 
 
 class TestClusteringAndMediaServerIntegration:
@@ -321,26 +334,70 @@ class TestClusteringAndMediaServerIntegration:
         ]
         assert all(backend.should_delete({'Name': k}) for k in result)
 
+    def test_colliding_formatted_names_are_disambiguated_without_overwriting(
+        self, monkeypatch, caplog
+    ):
+        constant = types.SimpleNamespace(
+            format_name=lambda name, chunk_index=None: 'Audiomuse/Same',
+            should_delete=lambda p: ((p or {}).get('Name') or '').startswith('Audiomuse/'),
+        )
+        monkeypatch.setattr(
+            manager.plugin_manager, 'get_clustering_provider', lambda _c: constant
+        )
+        monkeypatch.setattr(
+            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'constant_plugin'
+        )
+
+        result = clustering._name_and_prepare_playlists(
+            {
+                'named_playlists': {
+                    'Rock': [('s1', 'T1', 'A1')],
+                    'Jazz': [('s2', 'T2', 'A2'), ('s3', 'T3', 'A3'), ('s4', 'T4', 'A4')],
+                },
+                'playlist_centroids': {},
+                'playlist_primary_genres': {},
+                'parameters': {'max_songs_per_cluster': 2},
+            },
+            'NONE', '', '', '', '', '', '', '', '', '',
+        )
+
+        assert sorted(result.keys()) == [
+            'Audiomuse/Same',
+            'Audiomuse/Same (2)',
+            'Audiomuse/Same (3)',
+        ]
+        assert all(constant.should_delete({'Name': k}) for k in result)
+        assert 'collided' in caplog.text
+
+    def test_assign_playlist_chunks_four_arg_default_stays_compatible(self):
+        out = {}
+        songs = [('s1', 'T1', 'A1'), ('s2', 'T2', 'A2'), ('s3', 'T3', 'A3')]
+        _assign_playlist_chunks(songs, 2, 'Chill_automatic', out)
+        assert sorted(out.keys()) == ['Chill_automatic (1)', 'Chill_automatic (2)']
+
     @patch('tasks.mediaserver.config')
     @patch('tasks.mediaserver.navidrome.get_all_playlists')
     @patch('tasks.mediaserver.navidrome.delete_playlist')
-    def test_delete_playlists_where_uses_the_plugin_predicate(
+    def test_delete_playlists_where_uses_predicate_and_skips_missing_ids(
         self, mock_delete, mock_get, mock_config
     ):
-        from tasks.mediaserver import delete_playlists_where
+        from tasks.mediaserver import delete_playlists_by_suffix, delete_playlists_where
 
         backend = _FolderNamer(prefix='Audiomuse/', suffix='')
         mock_config.MEDIASERVER_TYPE = 'navidrome'
         listing = [
             {'Id': 'p1', 'Name': 'Audiomuse/Velvet Jazz'},
             {'Id': 'p2', 'Name': 'Personal Favorites'},
+            {'Name': 'Audiomuse/NoId'},
+            {'Id': 'p4', 'Name': None},
             {'id': 'p3', 'Name': 'Audiomuse/Synthwave (1)'},
         ]
         mock_get.return_value = listing
         mock_delete.return_value = True
 
         deleted_ids, playlists = delete_playlists_where(backend.should_delete)
-
         assert deleted_ids == ['p1', 'p3']
         assert [call.args[0] for call in mock_delete.call_args_list] == ['p1', 'p3']
         assert playlists == listing
+
+        delete_playlists_by_suffix('_automatic')

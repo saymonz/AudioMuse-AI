@@ -1312,6 +1312,10 @@ def _cluster_one_server_impl(
         report(f"Creating {len(final_playlists_with_details)} playlists on this server...", 96)
         with registry.bind(target_server):
             if CLUSTERING_CLEANING:
+                logger.info(
+                    "Starting cleanup of previous clustering playlists (provider: %s).",
+                    namer.owner or 'built-in _automatic',
+                )
                 deleted_ids, playlists = delete_playlists_where(namer.should_delete)
                 namer.after_cleanup(deleted_ids, playlists)
             for name, songs_with_details in final_playlists_with_details.items():

@@ -335,7 +335,7 @@ class PluginContext:
             )
         self.analysis_providers[component] = {'factory': factory, 'cache': bool(cache)}
 
-    def register_clustering_provider(self, component, factory, cache=True):
+    def register_clustering_provider(self, component, factory):
         if component not in CLUSTERING_COMPONENTS:
             logger.warning(
                 'Plugin %s registered a clustering provider for unknown component %r; '
@@ -348,4 +348,4 @@ class PluginContext:
                 'Plugin %s registered two clustering providers for %r; keeping the last one',
                 self.plugin_id, component,
             )
-        self.clustering_providers[component] = {'factory': factory, 'cache': bool(cache)}
+        self.clustering_providers[component] = factory

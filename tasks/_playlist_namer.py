@@ -28,15 +28,17 @@ Main Features:
 * Consults loaded plugins for a 'playlist_naming' clustering provider first
 * Falls back to the built-in ``_automatic`` namer when no plugin registered one
   or when the replacement is missing part of ``REQUIRED_METHODS``
-* The built-in namer goes through the same calls, so clustering has one path
-* Isolates per-call errors so a broken plugin never aborts clustering, never
-  silently merges two playlists under one name, and never wipes unrelated
-  user playlists
+* Preserves the server context captured at resolution across every provider call
+* Isolates per-call errors so a broken plugin never aborts clustering and never
+  wipes unrelated user playlists
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+
+from .mediaserver import context as ms_context
 
 logger = logging.getLogger(__name__)
 
@@ -68,34 +70,43 @@ _DEFAULT_NAMER = _DefaultPlaylistNamer()
 
 
 class _PluginPlaylistNamer:
-    def __init__(self, backend, owner):
+    def __init__(self, backend, owner, server=None):
         self._backend = backend
         self.owner = owner or 'unknown'
-        self._issued = set()
+        self._server = server
+
+    @contextlib.contextmanager
+    def _bound(self):
+        if self._server is not None and ms_context.active_server() is None:
+            with ms_context.use_server(self._server):
+                yield
+        else:
+            yield
 
     def format_name(self, base_name, chunk_index=None):
         fallback = _DEFAULT_NAMER.format_name(base_name, chunk_index)
         try:
-            result = self._backend.format_name(base_name, chunk_index=chunk_index)
+            with self._bound():
+                result = self._backend.format_name(base_name, chunk_index=chunk_index)
         except Exception:
             logger.exception(
                 "Plugin %s: format_name failed for %r; using the built-in _automatic name instead",
                 self.owner, base_name,
             )
             return fallback
-        if not isinstance(result, str) or not result.strip() or result in self._issued:
+        if not isinstance(result, str) or not result.strip():
             logger.warning(
-                "Plugin %s: format_name(%r, %r) returned an empty, non-string or "
-                "already used value %r; using the built-in _automatic name instead",
+                "Plugin %s: format_name(%r, %r) returned an empty or non-string value %r; "
+                "using the built-in _automatic name instead",
                 self.owner, base_name, chunk_index, result,
             )
             return fallback
-        self._issued.add(result)
         return result
 
     def should_delete(self, playlist):
         try:
-            return bool(self._backend.should_delete(playlist))
+            with self._bound():
+                return bool(self._backend.should_delete(playlist))
         except Exception:
             playlist_id = (playlist or {}).get('Id') or (playlist or {}).get('id')
             logger.exception(
@@ -106,7 +117,7 @@ class _PluginPlaylistNamer:
 
     def unformat_name(self, playlist_name):
         value = self._call_optional('unformat_name', playlist_name)
-        return value if isinstance(value, str) and value else playlist_name
+        return value if isinstance(value, str) and value.strip() else playlist_name
 
     def on_created(self, playlist, playlist_name):
         if playlist is not None:
@@ -120,38 +131,31 @@ class _PluginPlaylistNamer:
         if not callable(fn):
             return None
         try:
-            return fn(*args)
+            with self._bound():
+                return fn(*args)
         except Exception:
             logger.exception("Plugin %s: %s hook failed", self.owner, name)
             return None
 
 
 def get_playlist_namer():
-    override = _plugin_namer_backend()
-    if override is not None and _has_required_surface(override):
-        return _PluginPlaylistNamer(override, _provider_owner())
+    override, owner = _resolve_plugin_backend()
+    if override is not None and _has_required_surface(override, owner):
+        return _PluginPlaylistNamer(override, owner, server=ms_context.active_server())
     return _DEFAULT_NAMER
 
 
-def _plugin_namer_backend():
+def _resolve_plugin_backend():
     try:
         from plugin.manager import plugin_manager
 
-        return plugin_manager.get_clustering_provider('playlist_naming')
+        backend = plugin_manager.get_clustering_provider('playlist_naming')
+        return backend, plugin_manager.clustering_provider_owner('playlist_naming')
     except Exception:
-        return None
+        return None, None
 
 
-def _provider_owner():
-    try:
-        from plugin.manager import plugin_manager
-
-        return plugin_manager.clustering_provider_owner('playlist_naming')
-    except Exception:
-        return None
-
-
-def _has_required_surface(backend):
+def _has_required_surface(backend, owner):
     missing = [
         name for name in REQUIRED_METHODS if not callable(getattr(backend, name, None))
     ]
@@ -160,6 +164,6 @@ def _has_required_surface(backend):
     logger.warning(
         "Plugin %s: its playlist_naming provider %r is missing %s; "
         "using the built-in _automatic naming instead",
-        _provider_owner() or 'unknown', backend, ', '.join(missing),
+        owner or 'unknown', backend, ', '.join(missing),
     )
     return False
