@@ -1,0 +1,100 @@
+name: Build and Publish Custom AudioMuse-AI Images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream base version to use (e.g. latest or v3.7.0)'
+        required: true
+        default: 'latest'
+      release_tag:
+        description: 'Custom tag name to apply (e.g. latest or v3.7.0-custom)'
+        required: true
+        default: 'latest'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: web
+            base_suffix: ""
+            out_suffix: ""
+            platforms: linux/amd64
+          - flavor: nvidia
+            base_suffix: "-nvidia"
+            out_suffix: "-nvidia"
+            platforms: linux/amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_OWNER}/audiomuse-ai"
+          FLAVOR_BASE_SUFFIX="${{ matrix.base_suffix }}"
+          FLAVOR_OUT_SUFFIX="${{ matrix.out_suffix }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            UPSTREAM_TAG="${{ inputs.upstream_version }}"
+            UPSTREAM_TAG="${UPSTREAM_TAG#v}"
+            BASE_IMAGE="ghcr.io/neptunehub/audiomuse-ai:${UPSTREAM_TAG}${FLAVOR_BASE_SUFFIX}"
+
+            TAG_NAME="${{ inputs.release_tag }}"
+            TAG_NAME="${TAG_NAME#v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            REF_TAG="${GITHUB_REF#refs/tags/v}"
+            # For tag pushes, use latest upstream base by default or specific version if matching
+            BASE_IMAGE="ghcr.io/neptunehub/audiomuse-ai:latest${FLAVOR_BASE_SUFFIX}"
+            TAG_NAME="${REF_TAG}"
+          else
+            BASE_IMAGE="ghcr.io/neptunehub/audiomuse-ai:latest${FLAVOR_BASE_SUFFIX}"
+            TAG_NAME="latest"
+          fi
+
+          if [ "${TAG_NAME}" = "latest" ]; then
+            ALL_TAGS="${IMAGE}:latest${FLAVOR_OUT_SUFFIX}"
+          else
+            ALL_TAGS="${IMAGE}:${TAG_NAME}${FLAVOR_OUT_SUFFIX},${IMAGE}:latest${FLAVOR_OUT_SUFFIX}"
+          fi
+
+          echo "Base image: ${BASE_IMAGE}"
+          echo "Target tags: ${ALL_TAGS}"
+          echo "base_image=${BASE_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tags=${ALL_TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.overlay
+          platforms: ${{ matrix.platforms }}
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ steps.tags.outputs.base_image }}
+          tags: ${{ steps.tags.outputs.tags }}

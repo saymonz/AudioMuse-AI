@@ -1,0 +1,7 @@
+ARG BASE_IMAGE=ghcr.io/neptunehub/audiomuse-ai:latest
+FROM ${BASE_IMAGE}
+
+# Overlay custom modified files onto the official upstream image
+COPY config.py /app/config.py
+COPY tasks/ /app/tasks/
+COPY static/setup.js /app/static/setup.js
