@@ -38,6 +38,7 @@ _TRACK_IDS_REQUIRED = "Track IDs are required."
 
 _PUBLIC_SERVER_API = (
     'resolve_emby_jellyfin_user', 'delete_playlists_by_suffix', 'delete_automatic_playlists',
+    'delete_playlists_where',
     'get_recent_albums', 'get_tracks_from_album', 'download_track', 'get_all_songs',
     'list_libraries', 'search_albums', 'test_connection', 'get_playlist_by_name',
     'get_all_playlists', 'get_playlist_track_ids', 'create_playlist', 'create_instant_playlist',
@@ -75,31 +76,35 @@ def resolve_emby_jellyfin_user(identifier, token=None):
     return _provider(stype).resolve_user(identifier, creds.get('token') or fallback)
 
 
-def _delete_matching_playlists(playlists_to_check, delete_function, suffix):
-    deleted_count = 0
-    for p in playlists_to_check:
-        playlist_id = p.get('Id') or p.get('id')
-        try:
-            if p.get('Name', '').endswith(suffix) and delete_function(playlist_id):
-                deleted_count += 1
-        except Exception:
-            logger.exception(
-                f"Failed to delete playlist {playlist_id}; continuing with the remaining playlists."
-            )
-    return deleted_count
+def delete_playlists_where(should_delete):
+    """Delete the active server's playlists matching ``should_delete(playlist)``.
+
+    Returns ``(deleted_ids, playlists)``: the ids actually deleted and the full
+    listing they were picked from (empty when the server could not be listed).
+    """
+    deleted_ids = []
+    playlists = []
+    provider = _provider()
+    if provider is not None:
+        playlists = provider.get_all_playlists()
+        for p in playlists:
+            playlist_id = p.get('Id') or p.get('id')
+            if not playlist_id:
+                continue
+            try:
+                if should_delete(p) and provider.delete_playlist(playlist_id):
+                    deleted_ids.append(playlist_id)
+            except Exception:
+                logger.exception(
+                    f"Failed to delete playlist {playlist_id}; continuing with the remaining playlists."
+                )
+    logger.info(f"Finished deletion. Deleted {len(deleted_ids)} playlists.")
+    return deleted_ids, playlists
 
 
 def delete_playlists_by_suffix(suffix):
     logger.info(f"Starting deletion of all '{suffix}' playlists.")
-    deleted_count = 0
-
-    provider = _provider()
-    if provider is not None:
-        deleted_count = _delete_matching_playlists(
-            provider.get_all_playlists(), provider.delete_playlist, suffix
-        )
-
-    logger.info(f"Finished deletion. Deleted {deleted_count} playlists.")
+    delete_playlists_where(lambda p: (p.get('Name') or '').endswith(suffix))
 
 
 def delete_automatic_playlists():

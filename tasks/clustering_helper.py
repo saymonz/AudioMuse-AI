@@ -115,13 +115,33 @@ def _shuffle_playlist_songs(songs, playlist_name):
     return final_songs
 
 
-def _assign_playlist_chunks(final_songs, max_songs, base_name, final_playlists):
+def _assign_playlist_chunks(
+    final_songs, max_songs, base_name, final_playlists, format_name=None
+):
+    def _default_format(name, idx=None):
+        return f"{name} ({idx})" if idx is not None else name
+
+    def _store(raw_name, chunk):
+        key = raw_name
+        suffix = 2
+        while key in final_playlists:
+            key = f"{raw_name} ({suffix})"
+            suffix += 1
+        if key != raw_name:
+            logger.warning(
+                "Formatted playlist name %r collided with an existing playlist in this run; "
+                "renamed to %r to avoid overwriting it",
+                raw_name, key,
+            )
+        final_playlists[key] = chunk
+
+    fmt = _default_format if format_name is None else format_name
     if max_songs > 0 and len(final_songs) > max_songs:
         chunks = [final_songs[i : i + max_songs] for i in range(0, len(final_songs), max_songs)]
         for idx, chunk in enumerate(chunks, 1):
-            final_playlists[f"{base_name} ({idx})"] = chunk
+            _store(fmt(base_name, idx), chunk)
     else:
-        final_playlists[base_name] = final_songs
+        _store(fmt(base_name), final_songs)
 
 
 def _compose_name_from_ideas(context, avoid_names):
