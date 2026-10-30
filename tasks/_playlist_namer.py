@@ -28,8 +28,10 @@ Main Features:
 * Consults loaded plugins for a 'playlist_naming' clustering provider first
 * Falls back to the built-in ``_automatic`` namer when no plugin registered one
   or when the replacement is missing part of ``REQUIRED_METHODS``
-* Isolates per-call errors so a broken plugin never aborts clustering or wipes
-  unrelated user playlists
+* The built-in namer goes through the same calls, so clustering has one path
+* Isolates per-call errors so a broken plugin never aborts clustering, never
+  silently merges two playlists under one name, and never wipes unrelated
+  user playlists
 """
 
 from __future__ import annotations
@@ -41,18 +43,13 @@ logger = logging.getLogger(__name__)
 REQUIRED_METHODS = ('format_name', 'should_delete')
 
 
-def _default_format_name(base_name, chunk_index=None):
-    if chunk_index is not None:
-        return f"{base_name}_automatic ({chunk_index})"
-    return f"{base_name}_automatic"
-
-
 class _DefaultPlaylistNamer:
-    is_default = True
     owner = None
 
     def format_name(self, base_name, chunk_index=None):
-        return _default_format_name(base_name, chunk_index)
+        if chunk_index is not None:
+            return f"{base_name}_automatic ({chunk_index})"
+        return f"{base_name}_automatic"
 
     def should_delete(self, playlist):
         return ((playlist or {}).get('Name') or '').endswith('_automatic')
@@ -66,47 +63,34 @@ class _DefaultPlaylistNamer:
     def after_cleanup(self, deleted_ids, playlists):
         return None
 
-    def assign_chunks(self, final_songs, max_songs, final_name, base_name, final_playlists):
-        if max_songs > 0 and len(final_songs) > max_songs:
-            for offset in range(0, len(final_songs), max_songs):
-                idx = offset // max_songs + 1
-                final_playlists[f"{base_name} ({idx})"] = final_songs[offset : offset + max_songs]
-        else:
-            final_playlists[base_name] = final_songs
+
+_DEFAULT_NAMER = _DefaultPlaylistNamer()
 
 
 class _PluginPlaylistNamer:
-    is_default = False
-
     def __init__(self, backend, owner):
         self._backend = backend
         self.owner = owner or 'unknown'
-
-    def _invoke_format(self, base_name, chunk_index):
-        if chunk_index is None:
-            return self._backend.format_name(base_name)
-        try:
-            return self._backend.format_name(base_name, chunk_index=chunk_index)
-        except TypeError:
-            formatted = self._backend.format_name(base_name)
-            return f"{formatted} ({chunk_index})" if isinstance(formatted, str) else formatted
+        self._issued = set()
 
     def format_name(self, base_name, chunk_index=None):
+        fallback = _DEFAULT_NAMER.format_name(base_name, chunk_index)
         try:
-            result = self._invoke_format(base_name, chunk_index)
+            result = self._backend.format_name(base_name, chunk_index=chunk_index)
         except Exception:
             logger.exception(
                 "Plugin %s: format_name failed for %r; using the built-in _automatic name instead",
                 self.owner, base_name,
             )
-            return _default_format_name(base_name, chunk_index)
-        if not isinstance(result, str) or not result.strip():
+            return fallback
+        if not isinstance(result, str) or not result.strip() or result in self._issued:
             logger.warning(
-                "Plugin %s: format_name(%r) returned an empty or non-string value %r; "
-                "using the built-in _automatic name instead",
-                self.owner, base_name, result,
+                "Plugin %s: format_name(%r, %r) returned an empty, non-string or "
+                "already used value %r; using the built-in _automatic name instead",
+                self.owner, base_name, chunk_index, result,
             )
-            return _default_format_name(base_name, chunk_index)
+            return fallback
+        self._issued.add(result)
         return result
 
     def should_delete(self, playlist):
@@ -121,55 +105,25 @@ class _PluginPlaylistNamer:
             return False
 
     def unformat_name(self, playlist_name):
-        fn = getattr(self._backend, 'unformat_name', None)
-        if not callable(fn):
-            return playlist_name
-        try:
-            value = fn(playlist_name)
-        except Exception:
-            logger.exception(
-                "Plugin %s: unformat_name failed for %r; keeping stored name",
-                self.owner, playlist_name,
-            )
-            return playlist_name
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return playlist_name
+        value = self._call_optional('unformat_name', playlist_name)
+        return value if isinstance(value, str) and value else playlist_name
 
     def on_created(self, playlist, playlist_name):
-        if playlist is None:
-            return
-        fn = getattr(self._backend, 'on_created', None)
-        if not callable(fn):
-            return
-        try:
-            fn(playlist, playlist_name)
-        except Exception:
-            logger.exception(
-                "Plugin %s: on_created hook failed for %r",
-                self.owner, playlist_name,
-            )
+        if playlist is not None:
+            self._call_optional('on_created', playlist, playlist_name)
 
     def after_cleanup(self, deleted_ids, playlists):
-        fn = getattr(self._backend, 'after_cleanup', None)
+        self._call_optional('after_cleanup', deleted_ids, playlists)
+
+    def _call_optional(self, name, *args):
+        fn = getattr(self._backend, name, None)
         if not callable(fn):
-            return
+            return None
         try:
-            fn(deleted_ids, playlists)
+            return fn(*args)
         except Exception:
-            logger.exception("Plugin %s: after_cleanup hook failed", self.owner)
-
-    def assign_chunks(self, final_songs, max_songs, final_name, base_name, final_playlists):
-        if max_songs > 0 and len(final_songs) > max_songs:
-            for offset in range(0, len(final_songs), max_songs):
-                idx = offset // max_songs + 1
-                chunk_name = self.format_name(final_name, chunk_index=idx)
-                final_playlists[chunk_name] = final_songs[offset : offset + max_songs]
-        else:
-            final_playlists[base_name] = final_songs
-
-
-_DEFAULT_NAMER = _DefaultPlaylistNamer()
+            logger.exception("Plugin %s: %s hook failed", self.owner, name)
+            return None
 
 
 def get_playlist_namer():

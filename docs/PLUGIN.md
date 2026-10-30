@@ -543,15 +543,15 @@ def _load_backend():
 
 By default, clustering names every generated playlist `<name>_automatic` and deletes playlists ending in `_automatic` before creating the next batch. `register_clustering_provider('playlist_naming', factory, cache=True)` lets one plugin replace both naming and cleanup atomically, so the media server and AudioMuse-AI's own playlist view stay in sync.
 
-Your replacement must expose `format_name` and `should_delete`. If either is missing, core logs a warning naming your plugin and keeps the built-in `_automatic` scheme for both steps. The remaining methods are optional. Every call runs inside the target music server's bound context, so `active_server_id()` tells you which server is being clustered.
+Your replacement must expose `format_name` and `should_delete`. If either is missing, core logs a warning naming your plugin and keeps the built-in `_automatic` scheme for both steps. The remaining methods are optional. Core resolves your provider once per server per clustering run, inside that server's bound context, so a `cache=False` factory can read `active_server_id()` and keep it on the object it returns; that same object then serves every call of the run.
 
 | Method | Required | Must return |
 |---|---|---|
-| `format_name(base_name, chunk_index=None)` | Yes | Non-empty `str` for the playlist name (for example `f"Audiomuse/{base_name}"`). `chunk_index` is `None` unless the cluster was split into numbered parts (`1`, `2`, ...). An empty return or an exception falls back to `<base_name>_automatic`. |
+| `format_name(base_name, chunk_index=None)` | Yes | Non-empty `str` for the playlist name (for example `f"Audiomuse/{base_name}"`). `chunk_index` is `None` unless the cluster was split into numbered parts (`1`, `2`, ...). An empty return, a name already returned during this run, or an exception falls back to `<base_name>_automatic`. |
 | `should_delete(playlist)` | Yes | `True` when `playlist` (the raw dict from the media server, carrying `Id`/`id` and `Name`) belongs to clustering and should be removed during cleanup, `False` otherwise. |
 | `unformat_name(playlist_name)` | No | The bare title without your prefix/suffix (or `None` when `playlist_name` does not match your scheme), so AI playlist naming history keeps recognizing previously used titles. |
 | `on_created(playlist, playlist_name)` | No | Nothing. Called with the media server's response right after a clustering playlist is created, so a stateful plugin can record its `Id` in `table(...)`. |
-| `after_cleanup(deleted_ids, playlists)` | No | Nothing. Called once after cleanup finishes on the active server with the deleted playlist ids and the full playlist list fetched before deletion. |
+| `after_cleanup(deleted_ids, playlists)` | No | Nothing. Called once after cleanup finishes on the active server with the deleted playlist ids and the full playlist list fetched before deletion. That list is empty when the server could not be listed, so do not read it as "every playlist is gone". |
 
 ```python
 from plugin.api import get_setting

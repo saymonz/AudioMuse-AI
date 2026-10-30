@@ -115,13 +115,13 @@ def _shuffle_playlist_songs(songs, playlist_name):
     return final_songs
 
 
-def _assign_playlist_chunks(final_songs, max_songs, base_name, final_playlists):
+def _assign_playlist_chunks(final_songs, max_songs, name, final_playlists, format_name):
     if max_songs > 0 and len(final_songs) > max_songs:
         chunks = [final_songs[i : i + max_songs] for i in range(0, len(final_songs), max_songs)]
         for idx, chunk in enumerate(chunks, 1):
-            final_playlists[f"{base_name} ({idx})"] = chunk
+            final_playlists[format_name(name, idx)] = chunk
     else:
-        final_playlists[base_name] = final_songs
+        final_playlists[format_name(name)] = final_songs
 
 
 def _compose_name_from_ideas(context, avoid_names):

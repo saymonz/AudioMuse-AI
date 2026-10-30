@@ -112,7 +112,7 @@ from sanitization import sanitize_for_json
 from .mediaserver import (
     PlaylistIdTranslationError,
     create_playlist,
-    delete_automatic_playlists,
+    delete_playlists_where,
 )
 from .mediaserver import registry
 from ._playlist_namer import get_playlist_namer
@@ -1280,39 +1280,40 @@ def _cluster_one_server_impl(
 
     with registry.bind(target_server):
         namer = get_playlist_namer()
-        previous_playlist_names = _previous_names_for_naming(
-            target_server['server_id'] if target_server else None,
+    previous_playlist_names = _previous_names_for_naming(
+        target_server['server_id'] if target_server else None, namer=namer
+    )
+    tail_step = [f"naming the playlists of {server_name}"]
+    with row_heartbeat(
+        current_task_id, lambda: tail_step[0],
+        stop_after_minutes=slow_step_budget_minutes(QUEUE_WEDGED_MAIN_TASK_MINUTES),
+    ):
+        final_playlists_with_details = _name_and_prepare_playlists(
+            best_result,
+            ai_model_provider_param,
+            ollama_server_url_param,
+            ollama_model_name_param,
+            openai_server_url_param,
+            openai_model_name_param,
+            openai_api_key_param,
+            gemini_api_key_param,
+            gemini_model_name_param,
+            mistral_api_key_param,
+            mistral_model_name_param,
+            previous_playlist_names=previous_playlist_names,
             namer=namer,
         )
-        tail_step = [f"naming the playlists of {server_name}"]
-        with row_heartbeat(
-            current_task_id, lambda: tail_step[0],
-            stop_after_minutes=slow_step_budget_minutes(QUEUE_WEDGED_MAIN_TASK_MINUTES),
-        ):
-            final_playlists_with_details = _name_and_prepare_playlists(
-                best_result,
-                ai_model_provider_param,
-                ollama_server_url_param,
-                ollama_model_name_param,
-                openai_server_url_param,
-                openai_model_name_param,
-                openai_api_key_param,
-                gemini_api_key_param,
-                gemini_model_name_param,
-                mistral_api_key_param,
-                mistral_model_name_param,
-                previous_playlist_names=previous_playlist_names,
-                namer=namer,
-            )
 
-            cancel(force=True)
+        cancel(force=True)
 
-            tail_step[0] = (
-                f"creating {len(final_playlists_with_details)} playlists on {server_name}"
-            )
-            report(f"Creating {len(final_playlists_with_details)} playlists on this server...", 96)
+        tail_step[0] = (
+            f"creating {len(final_playlists_with_details)} playlists on {server_name}"
+        )
+        report(f"Creating {len(final_playlists_with_details)} playlists on this server...", 96)
+        with registry.bind(target_server):
             if CLUSTERING_CLEANING:
-                delete_automatic_playlists()
+                deleted_ids, playlists = delete_playlists_where(namer.should_delete)
+                namer.after_cleanup(deleted_ids, playlists)
             for name, songs_with_details in final_playlists_with_details.items():
                 item_ids = [item_id for item_id, _, _ in songs_with_details]
                 try:
@@ -1680,8 +1681,6 @@ def _previous_names_for_naming(server_id, namer=None):
         return []
     names = get_recent_playlist_names(server_id, limit=60)
     namer = get_playlist_namer() if namer is None else namer
-    if namer.is_default:
-        return names
     return [namer.unformat_name(name) for name in names]
 
 
@@ -1746,11 +1745,7 @@ def _name_and_prepare_playlists(
         assigned_names.add(final_name)
         used_playlist_names.append(final_name)
 
-        base_name = namer.format_name(final_name)
-        shuffled = _shuffle_playlist_songs(songs, base_name)
-        if namer.is_default:
-            _assign_playlist_chunks(shuffled, max_songs, base_name, final_playlists)
-        else:
-            namer.assign_chunks(shuffled, max_songs, final_name, base_name, final_playlists)
+        shuffled = _shuffle_playlist_songs(songs, final_name)
+        _assign_playlist_chunks(shuffled, max_songs, final_name, final_playlists, namer.format_name)
 
     return final_playlists

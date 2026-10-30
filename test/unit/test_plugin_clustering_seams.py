@@ -12,7 +12,14 @@ Covers ``PluginContext.register_clustering_provider``,
 ``PluginManager.get_clustering_provider``, ``tasks._playlist_namer.get_playlist_namer``,
 and the clustering / mediaserver callers that consume it:
 ``_previous_names_for_naming``, ``_name_and_prepare_playlists``, and
-``delete_automatic_playlists``.
+``delete_playlists_where``.
+
+Main Features:
+* PluginContext registers clustering components and stores factory and cache opts
+* PluginManager resolves and caches clustering providers, falling back on errors
+* get_playlist_namer resolves the provider or falls back to the default namer
+* Isolates per-call errors and colliding names so duplicate names fall back
+* Clustering and mediaserver delete_playlists_where delegate cleanup cleanly
 """
 
 import types
@@ -181,11 +188,12 @@ class TestPlaylistNamerResolver:
             manager.plugin_manager, 'get_clustering_provider', lambda _c: None
         )
         namer = playlist_namer.get_playlist_namer()
-        assert namer.is_default is True
+        assert namer is playlist_namer._DEFAULT_NAMER
         assert namer.format_name('Midnight Jazz') == 'Midnight Jazz_automatic'
         assert namer.format_name('Midnight Jazz', chunk_index=2) == 'Midnight Jazz_automatic (2)'
         assert namer.should_delete({'Name': 'Midnight Jazz_automatic'}) is True
         assert namer.should_delete({'Name': 'Midnight Jazz'}) is False
+        assert namer.unformat_name('Midnight Jazz_automatic') == 'Midnight Jazz_automatic'
 
     def test_incomplete_provider_warns_and_falls_back_to_default(self, monkeypatch, caplog):
         incomplete = types.SimpleNamespace(format_name=lambda n: n)
@@ -196,25 +204,26 @@ class TestPlaylistNamerResolver:
             manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'half_plugin'
         )
         namer = playlist_namer.get_playlist_namer()
-        assert namer.is_default is True
+        assert namer is playlist_namer._DEFAULT_NAMER
         assert 'half_plugin' in caplog.text
         assert 'should_delete' in caplog.text
 
-    def test_single_arg_format_name_still_supports_chunks(self, monkeypatch):
-        simple = types.SimpleNamespace(
-            format_name=lambda name: f"Auto/{name}",
-            should_delete=lambda p: (p.get('Name') or '').startswith('Auto/'),
+    def test_colliding_format_name_falls_back_instead_of_merging(self, monkeypatch, caplog):
+        constant = types.SimpleNamespace(
+            format_name=lambda name, chunk_index=None: 'Same Name',
+            should_delete=lambda _p: False,
         )
         monkeypatch.setattr(
-            manager.plugin_manager, 'get_clustering_provider', lambda _c: simple
+            manager.plugin_manager, 'get_clustering_provider', lambda _c: constant
         )
         monkeypatch.setattr(
-            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'simple_plugin'
+            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'constant_plugin'
         )
         namer = playlist_namer.get_playlist_namer()
-        assert namer.is_default is False
-        assert namer.format_name('Synthwave') == 'Auto/Synthwave'
-        assert namer.format_name('Synthwave', chunk_index=1) == 'Auto/Synthwave (1)'
+        assert namer.format_name('Rock') == 'Same Name'
+        assert namer.format_name('Jazz') == 'Jazz_automatic'
+        assert namer.format_name('Jazz', chunk_index=2) == 'Jazz_automatic (2)'
+        assert 'already used' in caplog.text
 
     def test_empty_or_failing_format_name_falls_back_per_call(self, monkeypatch, caplog):
         flaky = types.SimpleNamespace(
@@ -315,28 +324,23 @@ class TestClusteringAndMediaServerIntegration:
     @patch('tasks.mediaserver.config')
     @patch('tasks.mediaserver.navidrome.get_all_playlists')
     @patch('tasks.mediaserver.navidrome.delete_playlist')
-    def test_delete_automatic_playlists_delegates_to_plugin_and_runs_after_cleanup(
-        self, mock_delete, mock_get, mock_config, monkeypatch
+    def test_delete_playlists_where_uses_the_plugin_predicate(
+        self, mock_delete, mock_get, mock_config
     ):
-        from tasks.mediaserver import delete_automatic_playlists
+        from tasks.mediaserver import delete_playlists_where
 
         backend = _FolderNamer(prefix='Audiomuse/', suffix='')
-        monkeypatch.setattr(
-            manager.plugin_manager, 'get_clustering_provider', lambda _c: backend
-        )
-        monkeypatch.setattr(
-            manager.plugin_manager, 'clustering_provider_owner', lambda _c: 'playlist_naming'
-        )
         mock_config.MEDIASERVER_TYPE = 'navidrome'
-        mock_get.return_value = [
+        listing = [
             {'Id': 'p1', 'Name': 'Audiomuse/Velvet Jazz'},
             {'Id': 'p2', 'Name': 'Personal Favorites'},
             {'id': 'p3', 'Name': 'Audiomuse/Synthwave (1)'},
         ]
+        mock_get.return_value = listing
         mock_delete.return_value = True
 
-        delete_automatic_playlists()
+        deleted_ids, playlists = delete_playlists_where(backend.should_delete)
 
-        deleted_ids = [call.args[0] for call in mock_delete.call_args_list]
         assert deleted_ids == ['p1', 'p3']
-        assert backend.cleaned == [(['p1', 'p3'], 3)]
+        assert [call.args[0] for call in mock_delete.call_args_list] == ['p1', 'p3']
+        assert playlists == listing
