@@ -244,6 +244,7 @@ SETUP_BOOTSTRAP_EXCLUDED_KEYS = {
     # layout. Persisting one launch's answer would pin an old install directory
     # after the application is moved or upgraded, with no wizard field to fix it.
     'APP_DATA_DIR',
+    'COREML_MODEL_CACHE_DIR',
     'DATABASE_TYPE',
     'TEMP_DIR',
     'EMBEDDING_MODEL_PATH',
@@ -334,7 +335,7 @@ SETUP_BOOTSTRAP_EXCLUDED_KEYS = {
 }
 
 # --- General Constants (Read from Environment Variables where applicable) ---
-APP_VERSION = "v3.7.0"
+APP_VERSION = "v3.7.1"
 MAX_DISTANCE = float(os.environ.get("MAX_DISTANCE", "0.5"))
 MAX_SONGS_PER_CLUSTER = int(os.environ.get("MAX_SONGS_PER_CLUSTER", "0"))
 MAX_SONGS_PER_ARTIST = int(os.getenv("MAX_SONGS_PER_ARTIST", "3")) # Max songs per artist in similarity results and clustering
@@ -899,6 +900,9 @@ _DERIVED_DATABASE_URL = (
 
 DATABASE_TYPE = os.environ.get("DATABASE_TYPE", "postgres").lower()
 APP_DATA_DIR = os.environ.get("APP_DATA_DIR", "")
+# Where CoreML keeps the compiled models it reuses across sessions; the macOS launcher hands
+# each worker its own folder, emptied when the worker starts. Empty (everywhere else) = no cache.
+COREML_MODEL_CACHE_DIR = os.environ.get("COREML_MODEL_CACHE_DIR", "")
 AUDIOMUSE_PLATFORM = os.environ.get("AUDIOMUSE_PLATFORM", "").lower()
 AUDIOMUSE_CONTROL_SOCKET = os.environ.get("AUDIOMUSE_CONTROL_SOCKET", "")
 AUDIOMUSE_CONTROL_HOST = os.environ.get("AUDIOMUSE_CONTROL_HOST", "")
@@ -1769,6 +1773,10 @@ ENABLE_PROXY_FIX = os.environ.get("ENABLE_PROXY_FIX", "False").lower() == "true"
 # 1 but never the ceiling, so a direct API caller can ask for any number.
 INSTANT_PLAYLIST_DEFAULT_N_RESULTS = int(os.environ.get("INSTANT_PLAYLIST_DEFAULT_N_RESULTS", "50"))
 INSTANT_PLAYLIST_MAX_N_RESULTS = int(os.environ.get("INSTANT_PLAYLIST_MAX_N_RESULTS", "200"))
+# Longest chat request (userInput, in characters) the chat endpoints accept. Unlike
+# the song-count max above this one IS enforced by the API (400 before any parsing);
+# the chat page also uses it as its textarea's maxlength.
+INSTANT_PLAYLIST_MAX_INPUT_CHARS = int(os.environ.get("INSTANT_PLAYLIST_MAX_INPUT_CHARS", "2000"))
 # Max songs from a single artist in the instant playlist (diversity enforcement)
 MAX_SONGS_PER_ARTIST_PLAYLIST = int(os.environ.get("MAX_SONGS_PER_ARTIST_PLAYLIST", "5"))
 # Enable energy-arc shaping for playlist ordering (gentle start -> peak -> cool down)
